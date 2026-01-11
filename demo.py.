@@ -1,0 +1,74 @@
+import requests
+import io
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from pdf2image import convert_from_bytes
+from unidecode import unidecode
+from paddleocr import PaddleOCR
+from docx import Document
+
+# KONFIGURACJA TESTOWA
+API_URL = "https://api.sejm.gov.pl/sejm"
+OUTPUT_FILE = "wynik_demo.csv"
+DEMO_LIMIT = 3  # Sprawdzi tylko 3 najnowsze ustawy
+
+SEMANTIC_TRIGGERS = {
+    "FINANSE": ["uposazenie", "dodatek", "kwota", "skutki finansowe", "mld zl", "budzet"],
+    "WOJSKO": ["wojsko", "obrona", "zolnierz", "weteran", "amw", "uzbrojenie"]
+}
+
+print("⚡ [DEMO] Start silnika GPU...")
+try:
+    ocr = PaddleOCR(use_angle_cls=True, lang='pl', use_gpu=True, show_log=False)
+    print("✅ GPU Gotowe.")
+except:
+    print("❌ BŁĄD GPU! Sprawdź sterowniki.")
+    exit()
+
+def quick_scan(file_bytes, filename):
+    text = ""
+    ext = filename.split('.')[-1].lower()
+    try:
+        if ext == 'pdf':
+            # Limit 3 strony dla testu
+            images = convert_from_bytes(file_bytes, dpi=150, fmt='jpeg', thread_count=4, use_pdftocairo=True)
+            for img in images[:3]: 
+                res = ocr.ocr(np.array(img), cls=True)
+                if res and res[0]: text += " ".join([l[1][0] for l in res[0]]) + " "
+        elif ext == 'docx':
+            doc = Document(io.BytesIO(file_bytes))
+            text += " ".join([p.text for p in doc.paragraphs])
+        
+        clean = unidecode(text).lower()
+        found = [t for cat in SEMANTIC_TRIGGERS.values() for t in cat if t in clean]
+        return list(set(found))
+    except Exception as e:
+        print(f"Błąd pliku {filename}: {e}")
+        return []
+
+def main():
+    print(f"=== TESTUJEMY 3 PROCESY ===")
+    procs = requests.get(f"{API_URL}/term10/processes").json()[-DEMO_LIMIT:]
+    results = []
+
+    for p in procs:
+        print(f"Sprawdzam: {p['title'][:40]}...")
+        prints = p.get('prints', [])
+        for p_nr in prints:
+            try:
+                atts = requests.get(f"{API_URL}/term10/prints/{p_nr}").json().get('attachments', [])
+                for att in atts:
+                    print(f"  -> Plik: {att}")
+                    resp = requests.get(f"{API_URL}/term10/prints/{p_nr}/{att}")
+                    found = quick_scan(resp.content, att)
+                    if found:
+                        print(f"     🔴 ZNALEZIONO: {found}")
+                        results.append({"Plik": att, "Znaleziono": found})
+            except: pass
+    
+    pd.DataFrame(results).to_csv(OUTPUT_FILE)
+    print("\n✅ TEST ZAKOŃCZONY SUKCESEM. MOŻESZ ODPALAĆ MAIN.PY!")
+
+if __name__ == "__main__":
+    main()

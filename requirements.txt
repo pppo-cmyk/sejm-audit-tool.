@@ -1,0 +1,10 @@
+requests
+pandas
+pypdf
+pdf2image
+unidecode
+thefuzz
+python-docx
+paddleocr>=2.7.0
+paddlepaddle-gpu==2.6.0
+numpy<2.0.0

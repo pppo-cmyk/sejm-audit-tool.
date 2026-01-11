@@ -1,34 +1,34 @@
+python
 import requests
 import io
 import re
 import logging
 import zipfile
 import os
-import csv
+import time
 import numpy as np
 import concurrent.futures
 import pandas as pd
 from datetime import datetime
 from pypdf import PdfReader
+from pypdf.errors import FileNotDecryptedError
 from pdf2image import convert_from_bytes
 from unidecode import unidecode
 from thefuzz import fuzz
 from paddleocr import PaddleOCR
 from docx import Document
+import openpyxl
+import xlrd
 
 # ==============================================================================
 # ⚙️ KONFIGURACJA TOTALNA (PROJECT TOTAL RECALL)
 # ==============================================================================
-TERMS = [9, 10]  # Kadencje IX i X
+TERMS = [9, 10]
 API_URL = "https://api.sejm.gov.pl/sejm"
-OUTPUT_FILE = f"sejm_total_recall_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+OUTPUT_DIR = "sejm_audit_output"
+SAVE_INTERVAL_SECONDS = 300  # Zapis co 5 minut
 
-# BATCH_SIZE: Co ile procesów zapisywać wyniki na dysk?
-# To zabezpiecza przed utratą danych przy braku prądu/awarii przez 2 tygodnie pracy.
-BATCH_SAVE_INTERVAL = 5 
-
-# SŁOWNIK SZUKANY: Czego szukamy W ŚRODKU (niezależnie od tytułu ustawy)
-# Szukamy pieniędzy i służb w ustawach o rybach, drogach i edukacji.
+# SŁOWNIK RYZYKA
 SEMANTIC_TRIGGERS = {
     "FINANSE": ["uposazenie", "dodatek", "gratyfikacja", "naleznosc", "kwota bazowa", 
                 "skutki finansowe", "mld zl", "srodki majatkowe", "budzet", "zwiekszenie", "wynagrodzenie"],
@@ -37,14 +37,15 @@ SEMANTIC_TRIGGERS = {
                       "cba", "abw", "skw", "sww", "wywiad", "kontrwywiad", "funkcjonariusz"]
 }
 
+if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
+
 # ==============================================================================
-# 🚀 GPU ENGINE INIT
+# 🚀 GPU INIT
 # ==============================================================================
 print("⚡ [HPC INIT] Start silnika PaddleOCR (RTX 5090)...")
 try:
-    # use_angle_cls=True -> Prostuje krzywe skany (ważne przy starych drukach)
     GLOBAL_OCR_ENGINE = PaddleOCR(use_angle_cls=True, lang='pl', use_gpu=True, show_log=False)
-    print("✅ [HPC INIT] Gotowy. Tryb: 100% STRON RENDER | NO FILTERS.")
+    print("✅ [HPC INIT] Gotowy. Tryb: FORENSIC DIFF + ZIP + EXCEL + DEEP RIDER.")
 except Exception as e:
     raise RuntimeError(f"Błąd GPU: {e}")
 
@@ -69,46 +70,39 @@ def get_roman(n):
 def index_to_char(n):
     return chr(65 + n) if n < 26 else f"Z{n}"
 
-def extract_metadata(file_bytes, ext):
-    meta = {"Autor": "?", "Data": "?"}
-    try:
-        if ext == 'pdf':
-            info = PdfReader(io.BytesIO(file_bytes)).metadata
-            if info:
-                meta["Autor"] = info.author or "?"
-                if info.creation_date: meta["Data"] = str(info.creation_date).replace("D:", "").split('+')[0]
-        elif ext in ['docx', 'doc']:
-            prop = Document(io.BytesIO(file_bytes)).core_properties
-            meta["Autor"] = prop.author or "?"
-            if prop.created: meta["Data"] = prop.created.strftime("%Y-%m-%d %H:%M:%S")
-    except: pass
-    return meta
-
-def initialize_csv():
-    """Tworzy plik i nagłówki, jeśli nie istnieje."""
-    if not os.path.exists(OUTPUT_FILE):
-        df = pd.DataFrame(columns=["TREE_ID", "DRZEWO STRUKTURY", "Nazwa Pliku", "Link", 
-                                   "RYZYKO", "Alerty", "Autor", "Data Pliku", "Słowa"])
-        df.to_csv(OUTPUT_FILE, index=False, sep=';', encoding='utf-8-sig')
-
-def append_to_csv(rows):
-    """Dopisuje wyniki do pliku na dysku (tryb bezpieczny)."""
+def save_batch_to_disk(rows, batch_idx):
     if not rows: return
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"{OUTPUT_DIR}/audit_part_{batch_idx}_{timestamp}.csv"
     df = pd.DataFrame(rows)
-    # Filtrujemy kolumny dla porządku
-    cols = ["TREE_ID", "DRZEWO STRUKTURY", "Nazwa Pliku", "Link", 
+    cols = ["TREE_ID", "STATUS_SKANU", "DRZEWO STRUKTURY", "Nazwa Pliku", "Link", 
             "RYZYKO", "Alerty", "Autor", "Data Pliku", "Słowa"]
-    # Uzupełnienie brakujących kolumn pustymi
     for c in cols:
         if c not in df.columns: df[c] = ""
-    
-    df[cols].to_csv(OUTPUT_FILE, mode='a', header=False, index=False, sep=';', encoding='utf-8-sig')
+    df[cols].to_csv(filename, index=False, sep=';', encoding='utf-8-sig')
+    print(f"💾 [AUTO-SAVE] Zapisano partię {batch_idx}: {filename} ({len(rows)} rekordów)")
+
+def robust_request(url, retries=3):
+    """Pobieranie z obsługą Rate Limit (429) - exponential backoff."""
+    delay = 2
+    for i in range(retries):
+        try:
+            resp = requests.get(url, timeout=120)
+            if resp.status_code == 429: # Za szybko!
+                wait = delay * (i + 1) * 3
+                print(f"🛑 Rate Limit (429). Czekam {wait}s...")
+                time.sleep(wait)
+                continue
+            return resp
+        except Exception as e:
+            time.sleep(delay)
+    return None
 
 # ==============================================================================
-# 🧠 NUCLEAR SCANNER (100% STRON)
+# 🧠 FORENSIC SCANNER
 # ==============================================================================
 
-class NuclearScanner:
+class ForensicScanner:
     def __init__(self, file_bytes, filename):
         self.file_bytes = file_bytes
         self.filename = filename
@@ -116,9 +110,11 @@ class NuclearScanner:
         self.risk = 0
         self.vectors = []
         self.alerts = []
-        self.full_text_cache = ""
+        
+        self.visual_text = ""  # OCR z obrazka (GPU)
+        self.logic_text = ""   # Tekst z kodu pliku
 
-    def _ocr_images_gpu(self, images):
+    def _ocr_gpu(self, images):
         text = ""
         for img in images:
             try:
@@ -131,225 +127,270 @@ class NuclearScanner:
 
     def scan_pdf(self):
         try:
-            # 1. RENDEROWANIE WSZYSTKICH STRON (BEZ LIMITU)
-            # Jeśli ustawa ma 500 stron, to renderujemy 500 stron.
-            images = convert_from_bytes(self.file_bytes, dpi=200, fmt='jpeg', thread_count=8, use_pdftocairo=True)
-            
-            # 2. CZYTANIE PRZEZ GPU
-            self.full_text_cache = self._ocr_images_gpu(images)
-            
-            # Dodatkowo wyciągamy tekst z warstwy logicznej (double check)
-            try:
-                reader = PdfReader(io.BytesIO(self.file_bytes))
-                for page in reader.pages:
-                    self.full_text_cache += (page.extract_text() or "") + " "
-            except: pass
+            # 1. WARSTWA LOGICZNA
+            reader = PdfReader(io.BytesIO(self.file_bytes))
+            if reader.is_encrypted:
+                try: reader.decrypt('') 
+                except:
+                    self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
+                    self.risk += 10
+                    return
 
+            for page in reader.pages:
+                self.logic_text += (page.extract_text() or "") + " "
+
+            # 2. WARSTWA WIZUALNA (GPU RENDER 100% STRON)
+            images = convert_from_bytes(self.file_bytes, dpi=200, fmt='jpeg', thread_count=8, use_pdftocairo=True)
+            self.visual_text = self._ocr_gpu(images)
+
+        except FileNotDecryptedError:
+            self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
+            self.risk += 10
         except Exception as e:
-            self.alerts.append(f"PDF Render Error: {str(e)}")
+            self.alerts.append(f"PDF Error: {str(e)}")
 
     def scan_docx(self):
         try:
-            # 1. Tekst
             doc = Document(io.BytesIO(self.file_bytes))
-            self.full_text_cache += " ".join([p.text for p in doc.paragraphs])
-            # Tabele w Wordzie
+            self.logic_text += " ".join([p.text for p in doc.paragraphs])
             for t in doc.tables:
                 for r in t.rows:
-                    for c in r.cells:
-                        self.full_text_cache += c.text + " "
+                    for c in r.cells: self.logic_text += c.text + " "
             
-            # 2. Obrazki w Wordzie
+            # Obrazki w Wordzie
             with zipfile.ZipFile(io.BytesIO(self.file_bytes)) as z:
                 media = [f for f in z.namelist() if f.startswith('word/media/')]
                 if media:
                     from PIL import Image
-                    pil_images = []
+                    pil_imgs = []
                     for m in media:
                         with z.open(m) as f:
-                            try: pil_images.append(Image.open(f).convert('RGB'))
+                            try: pil_imgs.append(Image.open(f).convert('RGB'))
                             except: pass
-                    if pil_images:
-                        ocr = self._ocr_images_gpu(pil_images)
-                        if ocr:
-                            self.full_text_cache += " " + ocr
-                            self.alerts.append("[SKAN W WORDZIE]")
+                    if pil_imgs:
+                        self.visual_text += self._ocr_gpu(pil_imgs)
+                        self.alerts.append("[SKAN W WORDZIE]")
+        except: pass
+
+    def scan_excel(self):
+        try:
+            # Excel traktujemy jako logiczny
+            df_dict = pd.read_excel(io.BytesIO(self.file_bytes), sheet_name=None)
+            for sheet_name, df in df_dict.items():
+                self.logic_text += f" [Arkusz: {sheet_name}] {df.to_string()} "
         except Exception as e:
-            self.alerts.append(f"DOCX Error: {str(e)}")
+            self.alerts.append(f"Excel Error: {e}")
 
     def analyze_results(self):
-        clean = unidecode(self.full_text_cache).lower()
-        clean = re.sub(r'[^a-z0-9\s]', '', clean)
+        clean_visual = unidecode(self.visual_text).lower()
+        clean_logic = unidecode(self.logic_text).lower()
         
+        # Łączymy do szukania triggerów
+        combined_text = clean_visual + " " + clean_logic
+        clean_combined = re.sub(r'[^a-z0-9\s]', '', combined_text)
+
         found_cats = set()
         
+        # 1. SZUKANIE SŁÓW
         for cat, terms in SEMANTIC_TRIGGERS.items():
             for term in terms:
                 term_clean = unidecode(term).lower()
-                # Fuzzy match > 90%
-                if term_clean in clean or fuzz.partial_ratio(term_clean, clean) > 90:
+                # Fuzzy match
+                if term_clean in clean_combined or fuzz.partial_ratio(term_clean, clean_combined) > 90:
                     self.vectors.append(term)
                     found_cats.add(cat)
                     self.risk += 2
-        
-        # Logika "Wrzutki"
+
+        # 2. FORENSIC DIFF (PORÓWNANIE WARSTW - TYLKO DLA PDF)
+        # Dla Excela/Worda nie robimy pełnego diffa, bo nie renderujemy całych stron wizualnie
+        if self.ext == 'pdf':
+            for vec in self.vectors:
+                in_logic = vec in clean_logic
+                in_visual = vec in clean_visual
+                
+                # A. INJECTION (Biały tekst)
+                if in_logic and not in_visual:
+                    self.alerts.append(f"⚠️ INJECTION (Tylko w kodzie): '{vec}'")
+                    self.risk += 5
+                
+                # B. DEEP RIDER (Tylko na obrazie)
+                if in_visual and not in_logic:
+                    self.alerts.append(f"👁️ DEEP RIDER (Tylko na obrazie): '{vec}'")
+                    self.risk += 5
+
         if "WOJSKO_SLUZBY" in found_cats and "FINANSE" in found_cats:
             self.risk += 10
-            self.alerts.append("🚨 KORELACJA (KASA DLA SŁUŻB)")
+            self.alerts.append("🚨 KORELACJA (SŁUŻBY+KASA)")
 
         return min(self.risk, 10)
 
     def run(self):
         if self.ext == 'pdf': self.scan_pdf()
         elif self.ext in ['docx', 'doc']: self.scan_docx()
-        # Pliki tekstowe/inne też sprawdzamy
+        elif self.ext in ['xlsx', 'xls']: self.scan_excel()
         else:
-            try: self.full_text_cache = self.file_bytes.decode('utf-8', errors='ignore')
+            try: self.logic_text = self.file_bytes.decode('utf-8', errors='ignore')
             except: pass
             
         return self.analyze_results()
 
 # ==============================================================================
-# 🌳 WORKER DRZEWA (BEZ FILTRÓW)
+# 🌳 WORKER (REKURENCJA ZIP)
 # ==============================================================================
 
-def worker_process_full_tree(proc, term, proc_idx):
+def process_file_content(content, filename, file_id, visual_tree, url):
     rows = []
+    ext = filename.split('.')[-1].lower()
+    
+    # OBSŁUGA ARCHIWÓW (ZIP)
+    if ext == 'zip':
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                rows.append({
+                    "TREE_ID": file_id, "STATUS_SKANU": "OK (ZIP)",
+                    "DRZEWO STRUKTURY": f"{visual_tree} 📦 {filename}",
+                    "Nazwa Pliku": filename, "Link": url, "RYZYKO": 0, "Alerty": "Rozpakowano w locie", "Słowa": ""
+                })
+                
+                for i, zip_file_name in enumerate(z.namelist()):
+                    if zip_file_name.endswith('/'): continue
+                    sub_content = z.read(zip_file_name)
+                    sub_id = f"{file_id}.{i+1}"
+                    sub_tree = visual_tree.replace("└──", "    └──")
+                    
+                    rows.extend(process_file_content(
+                        sub_content, zip_file_name, sub_id, f"{sub_tree} ↪️", "wewn_zip"
+                    ))
+            return rows
+        except: pass 
+
+    # PLIK POJEDYNCZY
+    row = {
+        "TREE_ID": file_id, "STATUS_SKANU": "OK",
+        "DRZEWO STRUKTURY": f"{visual_tree} 📄 {filename}",
+        "Nazwa Pliku": filename, "Link": url,
+        "RYZYKO": 0, "Alerty": "", "Autor": "?", "Data Pliku": "?", "Słowa": ""
+    }
+
+    try:
+        m = extract_metadata(content, ext)
+        row["Autor"] = m["Autor"]
+        row["Data Pliku"] = m["Data"]
+        
+        scanner = ForensicScanner(content, filename)
+        risk = scanner.run()
+        
+        row["RYZYKO"] = risk
+        row["Słowa"] = ", ".join(list(set(scanner.vectors)))
+        row["Alerty"] = " | ".join(scanner.alerts)
+        
+    except Exception as e:
+        row["STATUS_SKANU"] = f"SCAN ERROR: {str(e)}"
+
+    return [row]
+
+def worker_process(proc, term, proc_idx):
+    rows = []
+    process_status = "OK"
     roman_id = get_roman(proc_idx)
     
-    # 1. KORZEŃ (PROCES)
+    # NAGŁÓWEK PROCESU
     rows.append({
-        "TREE_ID": f"{roman_id}",
+        "TREE_ID": f"{roman_id}", "STATUS_SKANU": "...",
         "DRZEWO STRUKTURY": f"📂 [{proc.get('num', '?')}] {proc['title'][:150]}...",
         "Nazwa Pliku": "", "Link": f"https://sejm.gov.pl/Sejm{term}.nsf/przebieg.xsp?id={proc['num']}",
         "RYZYKO": "", "Alerty": "", "Autor": "", "Data Pliku": "", "Słowa": ""
     })
 
     prints = proc.get('prints', [])
-    # Jeśli proces nie ma druków (np. wczesna faza), to i tak jest odnotowany w korzeniu.
-    
     for p_i, print_nr in enumerate(prints, 1):
-        # 2. GAŁĄŹ (DRUK)
         print_id = f"{roman_id}.{p_i}"
         rows.append({
-            "TREE_ID": print_id,
-            "DRZEWO STRUKTURY": f"    ├── 📁 Druk nr {print_nr}",
+            "TREE_ID": print_id, "STATUS_SKANU": "",
+            "DRZEWO STRUKTURY": f"    ├── 📁 Druk {print_nr}",
             "Nazwa Pliku": "", "Link": "", "RYZYKO": "", "Alerty": "", "Autor": "", "Data Pliku": "", "Słowa": ""
         })
 
         try:
-            meta = requests.get(f"{API_URL}/term{term}/prints/{print_nr}", timeout=10).json()
-            attachments = meta.get('attachments', [])
-            
+            meta_resp = robust_request(f"{API_URL}/term{term}/prints/{print_nr}")
+            if not meta_resp or meta_resp.status_code != 200:
+                rows[-1]["STATUS_SKANU"] = "API ERROR"
+                continue
+                
+            attachments = meta_resp.json().get('attachments', [])
             for f_i, att in enumerate(attachments):
-                # 3. LIŚĆ (PLIK) - SKANUJEMY KAŻDY JEDEN
-                file_char = index_to_char(f_i)
-                file_id = f"{print_id}.{file_char}"
+                file_id = f"{print_id}.{index_to_char(f_i)}"
                 url = f"{API_URL}/term{term}/prints/{print_nr}/{att}"
+                visual_tree = "        └──"
                 
-                row = {
-                    "TREE_ID": file_id,
-                    "DRZEWO STRUKTURY": f"        └── 📄 {att}",
-                    "Nazwa Pliku": att,
-                    "Link": url,
-                    "RYZYKO": 0, "Alerty": "", "Autor": "?", "Data Pliku": "?", "Słowa": ""
-                }
-                
-                try:
-                    resp = requests.get(url, timeout=120) # Długi timeout na duże pliki
-                    if resp.status_code == 200:
-                        content = resp.content
-                        m = extract_metadata(content, att.split('.')[-1].lower())
-                        row["Autor"] = m["Autor"]
-                        row["Data Pliku"] = m["Data"]
-                        
-                        # NUCLEAR SCAN
-                        scanner = NuclearScanner(content, att)
-                        risk = scanner.run()
-                        
-                        row["RYZYKO"] = risk
-                        row["Słowa"] = ", ".join(list(set(scanner.vectors)))
-                        row["Alerty"] = " | ".join(scanner.alerts)
-                    else:
-                        row["Alerty"] = "Błąd 404/500"
-                except Exception as e:
-                    row["Alerty"] = f"CRASH: {str(e)}"
-                
-                rows.append(row)
-                
-        except Exception as e:
-            logging.error(f"Err Druk {print_nr}: {e}")
+                file_resp = robust_request(url)
+                if file_resp and file_resp.status_code == 200:
+                    file_rows = process_file_content(file_resp.content, att, file_id, visual_tree, url)
+                    rows.extend(file_rows)
+                else:
+                    rows.append({
+                        "TREE_ID": file_id, "STATUS_SKANU": "DOWNLOAD ERROR",
+                        "DRZEWO STRUKTURY": f"{visual_tree} ❌ {att}", "Nazwa Pliku": att, "Link": url
+                    })
 
+        except Exception as e:
+            process_status = f"ERROR: {str(e)}"
+
+    rows[0]["STATUS_SKANU"] = process_status
     return rows
 
 def get_all_processes(term):
-    """Pobiera WSZYSTKIE procesy. Bez wyjątków."""
-    try:
-        data = requests.get(f"{API_URL}/term{term}/processes", timeout=30).json()
-        return data
-    except Exception as e:
-        print(f"Błąd API Sejmu dla kadencji {term}: {e}")
-        return []
+    try: return requests.get(f"{API_URL}/term{term}/processes", timeout=60).json()
+    except: return []
 
 # ==============================================================================
-# 🏁 MAIN LOOP (CIĄGŁA PRACA)
+# 🏁 MAIN LOOP
 # ==============================================================================
 
 def main():
-    print("=== SEJM TOTAL RECALL AUDIT ===")
-    print("System: RTX 5090 | Mode: 100% Coverage | Filters: OFF")
-    
-    initialize_csv()
+    print("=== SEJM TOTAL AUDIT (FULL FORENSIC V7.2) ===")
     
     tasks = []
     global_idx = 1
-    
-    # 1. Zbieranie listy celów (Wszystkie kadencje, wszystkie ustawy)
     for term in TERMS:
         procs = get_all_processes(term)
-        print(f"Kadencja {term}: Znaleziono {len(procs)} WSZYSTKICH procesów.")
+        print(f"Kadencja {term}: Znaleziono {len(procs)} procesów.")
         for p in procs:
             tasks.append((p, term, global_idx))
             global_idx += 1
             
-    print(f"Łącznie do przetworzenia: {len(tasks)} procesów legislacyjnych.")
-    print(f"Szacowany czas: DNI/TYGODNIE. Wyniki zapisywane na bieżąco do: {OUTPUT_FILE}")
-
-    # 2. Uruchomienie maszyny
-    # Batch processing to save memory and progress
-    batch_rows = []
+    print(f"Start pracy. Wyniki co 5 minut w folderze '{OUTPUT_DIR}'.")
     
-    # Używamy ThreadPoolExecutor, ale iterujemy ręcznie po wynikach, żeby zapisywać co chwilę
+    buffer_rows = []
+    last_save_time = time.time()
+    batch_counter = 1
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        # Mapowanie futures na ID procesu (do logowania)
-        future_to_proc = {executor.submit(worker_process_full_tree, t[0], t[1], t[2]): t[0]['num'] for t in tasks}
+        future_to_proc = {executor.submit(worker_process, t[0], t[1], t[2]): t[0]['num'] for t in tasks}
         
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_proc)):
+        completed = 0
+        total = len(tasks)
+        
+        for future in concurrent.futures.as_completed(future_to_proc):
+            completed += 1
             proc_num = future_to_proc[future]
             try:
                 res = future.result()
                 if res:
-                    batch_rows.extend(res)
-                    
-                    # Logowanie postępu
-                    if any(r['RYZYKO'] >= 6 for r in res if isinstance(r['RYZYKO'], int)):
-                         print(f"🚨 [{i+1}/{len(tasks)}] ZNALEZIONO RYZYKO w procesie {proc_num}")
-                    else:
-                         if i % 10 == 0: print(f"Processing [{i+1}/{len(tasks)}] - Proces {proc_num} OK.")
-
-                # Zapis partii co BATCH_SAVE_INTERVAL procesów
-                if (i + 1) % BATCH_SAVE_INTERVAL == 0:
-                    append_to_csv(batch_rows)
-                    batch_rows = [] # Czyścimy bufor
-                    
+                    buffer_rows.extend(res)
+                    if completed % 10 == 0:
+                        print(f"[{completed}/{total}] Przetworzono proces {proc_num}")
             except Exception as e:
-                print(f"Błąd krytyczny w procesie {proc_num}: {e}")
+                print(f"Błąd procesu {proc_num}: {e}")
 
-    # Zapisz resztki na końcu
-    if batch_rows:
-        append_to_csv(batch_rows)
-        
-    print(f"\n✅ SKANOWANIE ZAKOŃCZONE. Pełny raport: {OUTPUT_FILE}")
+            if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:
+                save_batch_to_disk(buffer_rows, batch_counter)
+                buffer_rows = []
+                batch_counter += 1
+                last_save_time = time.time()
+
+    if buffer_rows: save_batch_to_disk(buffer_rows, "FINAL")
+    print("✅ KONIEC PRACY.")
 
 if __name__ == "__main__":
     main()

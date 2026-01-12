@@ -28,13 +28,42 @@ API_URL = "https://api.sejm.gov.pl/sejm"
 OUTPUT_DIR = "sejm_audit_output"
 SAVE_INTERVAL_SECONDS = 300  # Zapis co 5 minut
 
+# WEBSHARE PROXY CONFIGURATION
+# Set these environment variables: WEBSHARE_PROXY_HOST, WEBSHARE_PROXY_PORT, WEBSHARE_PROXY_USER, WEBSHARE_PROXY_PASS
+PROXY_HOST = os.getenv('WEBSHARE_PROXY_HOST', '')
+PROXY_PORT = os.getenv('WEBSHARE_PROXY_PORT', '')
+PROXY_USER = os.getenv('WEBSHARE_PROXY_USER', '')
+PROXY_PASS = os.getenv('WEBSHARE_PROXY_PASS', '')
+
+# Proxy configuration for requests
+PROXIES = None
+if PROXY_HOST and PROXY_PORT:
+    if PROXY_USER and PROXY_PASS:
+        proxy_url = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
+    else:
+        proxy_url = f"http://{PROXY_HOST}:{PROXY_PORT}"
+    PROXIES = {
+        'http': proxy_url,
+        'https': proxy_url
+    }
+    # Log proxy info without exposing credentials
+    if PROXY_USER:
+        masked_user = f"{PROXY_USER[:2]}***" if len(PROXY_USER) > 2 else "***"
+        print(f"🌐 [PROXY] Używam Webshare proxy: {masked_user}@{PROXY_HOST}:{PROXY_PORT}")
+    else:
+        print(f"🌐 [PROXY] Używam Webshare proxy: {PROXY_HOST}:{PROXY_PORT}")
+else:
+    print("⚠️ [PROXY] Brak konfiguracji proxy - używam bezpośredniego połączenia")
+
 # SŁOWNIK RYZYKA
 SEMANTIC_TRIGGERS = {
     "FINANSE": ["uposazenie", "dodatek", "gratyfikacja", "naleznosc", "kwota bazowa", 
                 "skutki finansowe", "mld zl", "srodki majatkowe", "budzet", "zwiekszenie", "wynagrodzenie"],
     "WOJSKO_SLUZBY": ["wojsko", "obrona narodowa", "zolnierz", "weteran", "amw", 
                       "uzbrojenie", "modernizacja", "fundusz wsparcia", "sluzb specjalnych", 
-                      "cba", "abw", "skw", "sww", "wywiad", "kontrwywiad", "funkcjonariusz"]
+                      "cba", "abw", "skw", "sww", "wywiad", "kontrwywiad", "funkcjonariusz"],
+    "WOJSKO": ["sily zbrojne", "wojsko", "uzbrojenie", "amunicja", "czolg", "zakup broni", 
+               "modernizacja armii", "kontrakt zbrojeniowy", "f-35", "himars", "rakieta"]
 }
 
 if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
@@ -82,12 +111,41 @@ def save_batch_to_disk(rows, batch_idx):
     df[cols].to_csv(filename, index=False, sep=';', encoding='utf-8-sig')
     print(f"💾 [AUTO-SAVE] Zapisano partię {batch_idx}: {filename} ({len(rows)} rekordów)")
 
+def extract_metadata(content, ext):
+    """Wydobywa metadane z pliku (autor, data)."""
+    metadata = {"Autor": "?", "Data": "?"}
+    try:
+        if ext == 'pdf':
+            reader = PdfReader(io.BytesIO(content))
+            if reader.metadata:
+                metadata["Autor"] = reader.metadata.get('/Author', '?') or '?'
+                creation_date = reader.metadata.get('/CreationDate', '?')
+                if creation_date and creation_date != '?':
+                    # Parse PDF date format (D:YYYYMMDDHHmmss)
+                    if isinstance(creation_date, str) and creation_date.startswith('D:'):
+                        try:
+                            date_str = creation_date[2:10]  # YYYYMMDD
+                            metadata["Data"] = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                        except Exception:
+                            metadata["Data"] = creation_date
+                    else:
+                        metadata["Data"] = str(creation_date)
+        elif ext in ['docx', 'doc']:
+            doc = Document(io.BytesIO(content))
+            if doc.core_properties:
+                metadata["Autor"] = doc.core_properties.author or '?'
+                if doc.core_properties.created:
+                    metadata["Data"] = doc.core_properties.created.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return metadata
+
 def robust_request(url, retries=3):
     """Pobieranie z obsługą Rate Limit (429) - exponential backoff."""
     delay = 2
     for i in range(retries):
         try:
-            resp = requests.get(url, timeout=120)
+            resp = requests.get(url, timeout=120, proxies=PROXIES)
             if resp.status_code == 429: # Za szybko!
                 wait = delay * (i + 1) * 3
                 print(f"🛑 Rate Limit (429). Czekam {wait}s...")
@@ -340,7 +398,7 @@ def worker_process(proc, term, proc_idx):
     return rows
 
 def get_all_processes(term):
-    try: return requests.get(f"{API_URL}/term{term}/processes", timeout=60).json()
+    try: return requests.get(f"{API_URL}/term{term}/processes", timeout=60, proxies=PROXIES).json()
     except: return []
 
 # ==============================================================================

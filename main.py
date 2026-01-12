@@ -45,7 +45,7 @@ def check_system_dependencies():
             result = subprocess.run(['ldconfig', '-p'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             if 'libGL.so' not in result.stdout:
                 missing.append('libgl1')
-        except:
+        except Exception:
             # If ldconfig fails, warn anyway
             missing.append('libgl1 (nie można sprawdzić)')
     
@@ -264,7 +264,8 @@ class ForensicScanner:
         self.visual_text = ""  # OCR z obrazka (GPU)
         self.logic_text = ""   # Tekst z kodu pliku
 
-    def _ocr_gpu(self, images):
+    def _ocr_cpu(self, images):
+        """Process images using CPU-based OCR"""
         text = ""
         for img in images:
             try:
@@ -272,7 +273,8 @@ class ForensicScanner:
                 res = GLOBAL_OCR_ENGINE.ocr(img_array, cls=True)
                 if res and res[0]:
                     text += " ".join([line[1][0] for line in res[0]]) + " "
-            except: pass
+            except Exception:
+                pass
         return text
 
     def scan_pdf(self):
@@ -280,13 +282,14 @@ class ForensicScanner:
             # FULL OCR MODE - Scan every page visually using pdf2image and PaddleOCR
             # Do NOT use simple text extraction
             
-            # First check if encrypted
+            # Check if encrypted and get reader instance
+            reader = None
             try:
                 reader = PdfReader(io.BytesIO(self.file_bytes))
                 if reader.is_encrypted:
                     try:
                         reader.decrypt('')
-                    except:
+                    except Exception:
                         self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
                         self.risk += 10
                         return
@@ -306,16 +309,17 @@ class ForensicScanner:
                 thread_count=8,
                 use_pdftocairo=True
             )
-            self.visual_text = self._ocr_gpu(images)
+            self.visual_text = self._ocr_cpu(images)
             
             # For forensic analysis, we still want logic text for comparison
             # but visual text is primary
-            try:
-                reader = PdfReader(io.BytesIO(self.file_bytes))
-                for page in reader.pages:
-                    self.logic_text += (page.extract_text() or "") + " "
-            except:
-                pass  # If text extraction fails, we still have OCR
+            # Reuse reader instance if available
+            if reader is not None:
+                try:
+                    for page in reader.pages:
+                        self.logic_text += (page.extract_text() or "") + " "
+                except Exception:
+                    pass  # If text extraction fails, we still have OCR
 
         except FileNotDecryptedError:
             self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
@@ -339,12 +343,15 @@ class ForensicScanner:
                     pil_imgs = []
                     for m in media:
                         with z.open(m) as f:
-                            try: pil_imgs.append(Image.open(f).convert('RGB'))
-                            except: pass
+                            try:
+                                pil_imgs.append(Image.open(f).convert('RGB'))
+                            except Exception:
+                                pass
                     if pil_imgs:
-                        self.visual_text += self._ocr_gpu(pil_imgs)
+                        self.visual_text += self._ocr_cpu(pil_imgs)
                         self.alerts.append("[SKAN W WORDZIE]")
-        except: pass
+        except Exception:
+            pass
 
     def scan_excel(self):
         try:
@@ -402,8 +409,10 @@ class ForensicScanner:
         elif self.ext in ['docx', 'doc']: self.scan_docx()
         elif self.ext in ['xlsx', 'xls']: self.scan_excel()
         else:
-            try: self.logic_text = self.file_bytes.decode('utf-8', errors='ignore')
-            except: pass
+            try:
+                self.logic_text = self.file_bytes.decode('utf-8', errors='ignore')
+            except Exception:
+                pass
             
         return self.analyze_results()
 
@@ -435,7 +444,8 @@ def process_file_content(content, filename, file_id, visual_tree, url):
                         sub_content, zip_file_name, sub_id, f"{sub_tree} ↪️", "wewn_zip"
                     ))
             return rows
-        except: pass 
+        except Exception:
+            pass 
 
     # PLIK POJEDYNCZY
     row = {
@@ -513,8 +523,10 @@ def worker_process(proc, term, proc_idx):
     return rows
 
 def get_all_processes(term):
-    try: return requests.get(f"{API_URL}/term{term}/processes", timeout=60, proxies=PROXIES).json()
-    except: return []
+    try:
+        return requests.get(f"{API_URL}/term{term}/processes", timeout=60, proxies=PROXIES).json()
+    except Exception:
+        return []
 
 # ==============================================================================
 # 📝 SAMPLE REPORT GENERATOR

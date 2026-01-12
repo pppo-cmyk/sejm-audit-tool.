@@ -5,7 +5,9 @@ import re
 import logging
 import zipfile
 import os
+import sys
 import time
+import subprocess
 import numpy as np
 import concurrent.futures
 import pandas as pd
@@ -23,10 +25,48 @@ import xlrd
 # ==============================================================================
 # ⚙️ KONFIGURACJA TOTALNA (PROJECT TOTAL RECALL)
 # ==============================================================================
+
+# System dependencies check
+def check_system_dependencies():
+    """Check for required system dependencies."""
+    print("🔍 [SYSTEM CHECK] Sprawdzanie zależności systemowych...")
+    
+    missing = []
+    
+    # Check for poppler-utils (provides pdftoppm, pdftocairo)
+    try:
+        subprocess.run(['pdftoppm', '-v'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except FileNotFoundError:
+        missing.append('poppler-utils')
+    
+    # Check for libgl1 (OpenGL library)
+    if sys.platform.startswith('linux'):
+        try:
+            result = subprocess.run(['ldconfig', '-p'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            if 'libGL.so' not in result.stdout:
+                missing.append('libgl1')
+        except Exception:
+            # If ldconfig fails, warn anyway
+            missing.append('libgl1 (nie można sprawdzić)')
+    
+    if missing:
+        print(f"⚠️  [SYSTEM CHECK] BRAKUJĄCE ZALEŻNOŚCI: {', '.join(missing)}")
+        print(f"⚠️  [SYSTEM CHECK] Zainstaluj używając: sudo apt-get install {' '.join(missing)}")
+        print(f"⚠️  [SYSTEM CHECK] Program może nie działać poprawnie bez tych pakietów!")
+        return False
+    else:
+        print("✅ [SYSTEM CHECK] Wszystkie wymagane zależności systemowe są zainstalowane.")
+        return True
+
+check_system_dependencies()
+
 TERMS = [9, 10]
 API_URL = "https://api.sejm.gov.pl/sejm"
 OUTPUT_DIR = "sejm_audit_output"
 SAVE_INTERVAL_SECONDS = 300  # Zapis co 5 minut
+
+# High-resolution DPI for OCR
+PDF_DPI = 300  # High quality scan
 
 # WEBSHARE PROXY CONFIGURATION
 # Set these environment variables: WEBSHARE_PROXY_HOST, WEBSHARE_PROXY_PORT, WEBSHARE_PROXY_USER, WEBSHARE_PROXY_PASS
@@ -55,28 +95,45 @@ if PROXY_HOST and PROXY_PORT:
 else:
     print("⚠️ [PROXY] Brak konfiguracji proxy - używam bezpośredniego połączenia")
 
-# SŁOWNIK RYZYKA
+# SŁOWNIK RYZYKA - MILITARY & DEFENSE FOCUS
 SEMANTIC_TRIGGERS = {
-    "FINANSE": ["uposazenie", "dodatek", "gratyfikacja", "naleznosc", "kwota bazowa", 
-                "skutki finansowe", "mld zl", "srodki majatkowe", "budzet", "zwiekszenie", "wynagrodzenie"],
-    "WOJSKO_SLUZBY": ["wojsko", "obrona narodowa", "zolnierz", "weteran", "amw", 
-                      "uzbrojenie", "modernizacja", "fundusz wsparcia", "sluzb specjalnych", 
-                      "cba", "abw", "skw", "sww", "wywiad", "kontrwywiad", "funkcjonariusz"],
-    "WOJSKO": ["sily zbrojne", "wojsko", "uzbrojenie", "amunicja", "czolg", "zakup broni", 
-               "modernizacja armii", "kontrakt zbrojeniowy", "f-35", "himars", "rakieta"]
+    "MILITARY_DEFENSE": [
+        "wojsko", "czolg", "amunicja", "f-35", "f35", "uzbrojenie",
+        "obrona narodowa", "sily zbrojne", "zolnierz", "weteran",
+        "modernizacja armii", "kontrakt zbrojeniowy", "himars",
+        "rakieta", "zakup broni", "sprzet wojskowy", "system obrony",
+        "myśliwiec", "mysliwiec", "czolgi", "pancerz", "artyleria",
+        "wojska specjalne", "nsz", "dow", "dowodztwo", "batalion",
+        "brygada", "dywizja", "regiment", "kompania", "pluton",
+        "amw", "abw", "skw", "sww", "wywiad wojskowy", "kontrwywiad wojskowy",
+        "rosomak", "krab", "borsuk", "narew", "wisla", "homar",
+        "patriot", "piorun", "grom", "thunder", "javelin", "bayraktar",
+        "m1 abrams", "k2", "fa-50", "apache", "black hawk"
+    ]
 }
 
 if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
 
 # ==============================================================================
-# 🚀 GPU INIT
+# 🚀 OCR INITIALIZATION (CPU MODE - PREVENTS SEGFAULTS)
 # ==============================================================================
-print("⚡ [HPC INIT] Start silnika PaddleOCR (RTX 5090)...")
+# Security Note: Using PaddlePaddle 3.0.0+ to avoid CVEs in versions <= 2.6.0
+# The application does not use vulnerable functions (paddle.vision.ops.read_file, 
+# paddle.utils.download._wget_download) and only uses the safe PaddleOCR API.
+print("⚡ [OCR INIT] Start silnika PaddleOCR (CPU Mode)...")
 try:
-    GLOBAL_OCR_ENGINE = PaddleOCR(use_angle_cls=True, lang='pl', use_gpu=True, show_log=False)
-    print("✅ [HPC INIT] Gotowy. Tryb: FORENSIC DIFF + ZIP + EXCEL + DEEP RIDER.")
+    GLOBAL_OCR_ENGINE = PaddleOCR(
+        use_angle_cls=True,
+        lang='pl',
+        use_gpu=False,          # CPU mode to prevent segmentation faults
+        enable_mkldnn=True,     # Enable Intel MKL-DNN acceleration for CPU
+        show_log=False
+    )
+    print("✅ [OCR INIT] Gotowy. Tryb: HEAVY AUDIT MODE - Full OCR with CPU acceleration.")
 except Exception as e:
-    raise RuntimeError(f"Błąd GPU: {e}")
+    print(f"❌ [OCR INIT] Błąd inicjalizacji PaddleOCR: {e}")
+    print("⚠️  Sprawdź czy wszystkie zależności są zainstalowane.")
+    raise RuntimeError(f"Błąd OCR: {e}")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -140,20 +197,58 @@ def extract_metadata(content, ext):
         pass
     return metadata
 
-def robust_request(url, retries=3):
-    """Pobieranie z obsługą Rate Limit (429) - exponential backoff."""
-    delay = 2
-    for i in range(retries):
+def robust_request(url, retries=3, timeout=120):
+    """Pobieranie z obsługą Rate Limit (429) i proxy failures - exponential backoff with retries."""
+    base_delay = 2
+    for attempt in range(retries):
         try:
-            resp = requests.get(url, timeout=120, proxies=PROXIES)
-            if resp.status_code == 429: # Za szybko!
-                wait = delay * (i + 1) * 3
-                print(f"🛑 Rate Limit (429). Czekam {wait}s...")
+            resp = requests.get(url, timeout=timeout, proxies=PROXIES)
+            
+            if resp.status_code == 429:  # Rate Limit
+                wait = base_delay * (2 ** attempt)  # Exponential backoff
+                print(f"🛑 Rate Limit (429) - próba {attempt + 1}/{retries}. Czekam {wait}s...")
                 time.sleep(wait)
                 continue
+            
+            if resp.status_code == 200:
+                return resp
+            
+            # Other errors - retry with backoff
+            if attempt < retries - 1:
+                wait = base_delay * (2 ** attempt)
+                print(f"⚠️  HTTP {resp.status_code} - próba {attempt + 1}/{retries}. Czekam {wait}s...")
+                time.sleep(wait)
+                continue
+            
             return resp
+            
+        except requests.exceptions.ProxyError as e:
+            if attempt < retries - 1:
+                wait = base_delay * (2 ** attempt)
+                print(f"🔌 Proxy Error - próba {attempt + 1}/{retries}. Czekam {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"❌ Proxy failed after {retries} attempts: {e}")
+                return None
+                
+        except requests.exceptions.Timeout as e:
+            if attempt < retries - 1:
+                wait = base_delay * (2 ** attempt)
+                print(f"⏱️  Timeout - próba {attempt + 1}/{retries}. Czekam {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"❌ Timeout after {retries} attempts: {e}")
+                return None
+                
         except Exception as e:
-            time.sleep(delay)
+            if attempt < retries - 1:
+                wait = base_delay * (2 ** attempt)
+                print(f"⚠️  Error: {e} - próba {attempt + 1}/{retries}. Czekam {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"❌ Failed after {retries} attempts: {e}")
+                return None
+    
     return None
 
 # ==============================================================================
@@ -172,7 +267,8 @@ class ForensicScanner:
         self.visual_text = ""  # OCR z obrazka (GPU)
         self.logic_text = ""   # Tekst z kodu pliku
 
-    def _ocr_gpu(self, images):
+    def _ocr_cpu(self, images):
+        """Process images using CPU-based OCR"""
         text = ""
         for img in images:
             try:
@@ -180,26 +276,53 @@ class ForensicScanner:
                 res = GLOBAL_OCR_ENGINE.ocr(img_array, cls=True)
                 if res and res[0]:
                     text += " ".join([line[1][0] for line in res[0]]) + " "
-            except: pass
+            except Exception:
+                pass
         return text
 
     def scan_pdf(self):
         try:
-            # 1. WARSTWA LOGICZNA
-            reader = PdfReader(io.BytesIO(self.file_bytes))
-            if reader.is_encrypted:
-                try: reader.decrypt('') 
-                except:
-                    self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
-                    self.risk += 10
-                    return
+            # FULL OCR MODE - Scan every page visually using pdf2image and PaddleOCR
+            # Do NOT use simple text extraction
+            
+            # Check if encrypted and get reader instance
+            reader = None
+            try:
+                reader = PdfReader(io.BytesIO(self.file_bytes))
+                if reader.is_encrypted:
+                    try:
+                        reader.decrypt('')
+                    except Exception:
+                        self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
+                        self.risk += 10
+                        return
+            except FileNotDecryptedError:
+                self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
+                self.risk += 10
+                return
+            except Exception:
+                pass  # Continue with OCR even if PDF reading fails
 
-            for page in reader.pages:
-                self.logic_text += (page.extract_text() or "") + " "
-
-            # 2. WARSTWA WIZUALNA (GPU RENDER 100% STRON)
-            images = convert_from_bytes(self.file_bytes, dpi=200, fmt='jpeg', thread_count=8, use_pdftocairo=True)
-            self.visual_text = self._ocr_gpu(images)
+            # VISUAL LAYER - Render and OCR ALL pages at high DPI (300)
+            print(f"  🔬 [OCR] Skanowanie wizualne: {self.filename}")
+            images = convert_from_bytes(
+                self.file_bytes,
+                dpi=PDF_DPI,          # High resolution 300 DPI
+                fmt='jpeg',
+                thread_count=8,
+                use_pdftocairo=True
+            )
+            self.visual_text = self._ocr_cpu(images)
+            
+            # For forensic analysis, we still want logic text for comparison
+            # but visual text is primary
+            # Reuse reader instance if available
+            if reader is not None:
+                try:
+                    for page in reader.pages:
+                        self.logic_text += (page.extract_text() or "") + " "
+                except Exception:
+                    pass  # If text extraction fails, we still have OCR
 
         except FileNotDecryptedError:
             self.alerts.append("🔒 ZABLOKOWANE HASŁEM")
@@ -223,12 +346,15 @@ class ForensicScanner:
                     pil_imgs = []
                     for m in media:
                         with z.open(m) as f:
-                            try: pil_imgs.append(Image.open(f).convert('RGB'))
-                            except: pass
+                            try:
+                                pil_imgs.append(Image.open(f).convert('RGB'))
+                            except Exception:
+                                pass
                     if pil_imgs:
-                        self.visual_text += self._ocr_gpu(pil_imgs)
+                        self.visual_text += self._ocr_cpu(pil_imgs)
                         self.alerts.append("[SKAN W WORDZIE]")
-        except: pass
+        except Exception:
+            pass
 
     def scan_excel(self):
         try:
@@ -249,7 +375,7 @@ class ForensicScanner:
 
         found_cats = set()
         
-        # 1. SZUKANIE SŁÓW
+        # SZUKANIE SŁÓW - MILITARY & DEFENSE ONLY
         for cat, terms in SEMANTIC_TRIGGERS.items():
             for term in terms:
                 term_clean = unidecode(term).lower()
@@ -257,10 +383,9 @@ class ForensicScanner:
                 if term_clean in clean_combined or fuzz.partial_ratio(term_clean, clean_combined) > 90:
                     self.vectors.append(term)
                     found_cats.add(cat)
-                    self.risk += 2
+                    self.risk += 3  # Higher risk score for military content
 
-        # 2. FORENSIC DIFF (PORÓWNANIE WARSTW - TYLKO DLA PDF)
-        # Dla Excela/Worda nie robimy pełnego diffa, bo nie renderujemy całych stron wizualnie
+        # FORENSIC DIFF (PORÓWNANIE WARSTW - TYLKO DLA PDF)
         if self.ext == 'pdf':
             for vec in self.vectors:
                 in_logic = vec in clean_logic
@@ -276,9 +401,9 @@ class ForensicScanner:
                     self.alerts.append(f"👁️ DEEP RIDER (Tylko na obrazie): '{vec}'")
                     self.risk += 5
 
-        if "WOJSKO_SLUZBY" in found_cats and "FINANSE" in found_cats:
-            self.risk += 10
-            self.alerts.append("🚨 KORELACJA (SŁUŻBY+KASA)")
+        # Bonus for finding military content
+        if "MILITARY_DEFENSE" in found_cats:
+            self.alerts.append("🎯 MILITARY & DEFENSE CONTENT DETECTED")
 
         return min(self.risk, 10)
 
@@ -287,8 +412,10 @@ class ForensicScanner:
         elif self.ext in ['docx', 'doc']: self.scan_docx()
         elif self.ext in ['xlsx', 'xls']: self.scan_excel()
         else:
-            try: self.logic_text = self.file_bytes.decode('utf-8', errors='ignore')
-            except: pass
+            try:
+                self.logic_text = self.file_bytes.decode('utf-8', errors='ignore')
+            except Exception:
+                pass
             
         return self.analyze_results()
 
@@ -320,7 +447,8 @@ def process_file_content(content, filename, file_id, visual_tree, url):
                         sub_content, zip_file_name, sub_id, f"{sub_tree} ↪️", "wewn_zip"
                     ))
             return rows
-        except: pass 
+        except Exception:
+            pass 
 
     # PLIK POJEDYNCZY
     row = {
@@ -398,15 +526,116 @@ def worker_process(proc, term, proc_idx):
     return rows
 
 def get_all_processes(term):
-    try: return requests.get(f"{API_URL}/term{term}/processes", timeout=60, proxies=PROXIES).json()
-    except: return []
+    try:
+        return requests.get(f"{API_URL}/term{term}/processes", timeout=60, proxies=PROXIES).json()
+    except Exception:
+        return []
+
+# ==============================================================================
+# 📝 SAMPLE REPORT GENERATOR
+# ==============================================================================
+
+def generate_sample_report():
+    """Generate a sample report file on startup to show expected output format."""
+    sample_file = "RAPORT_PROBNY.txt"
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    sample_content = f"""
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    SEJM AUDIT TOOL - RAPORT PRÓBNY                         ║
+║                    Heavy Audit Mode - Military & Defense                   ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Data wygenerowania: {timestamp}
+Tryb skanowania: FULL OCR (pdf2image + PaddleOCR)
+Rozdzielczość: 300 DPI
+Kategoria: MILITARY & DEFENSE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PRZYKŁADOWE ZNALEZISKA (DUMMY DATA):
+
+[1] Proces IX.1234 - Ustawa o modernizacji Sił Zbrojnych
+    ├── Druk 1234
+    │   └── 📄 ustawa_modernizacja.pdf
+    │       ├── Ryzyko: 8/10
+    │       ├── Wykryte słowa: wojsko, czołg, amunicja, F-35, uzbrojenie
+    │       ├── Alerty: 🎯 MILITARY & DEFENSE CONTENT DETECTED
+    │       ├── Autor: Ministerstwo Obrony Narodowej
+    │       └── Data: 2024-06-15
+
+[2] Proces X.5678 - Ustawa o zakupie sprzętu obronnego
+    ├── Druk 5678
+    │   └── 📄 kontrakt_f35.pdf
+    │       ├── Ryzyko: 9/10
+    │       ├── Wykryte słowa: F-35, himars, rakieta, modernizacja armii
+    │       ├── Alerty: 🎯 MILITARY & DEFENSE CONTENT DETECTED | 👁️ DEEP RIDER
+    │       ├── Autor: MON
+    │       └── Data: 2024-08-22
+
+[3] Proces X.9012 - Ustawa o wsparciu weteranów
+    ├── Druk 9012
+    │   └── 📄 weterani_2024.pdf
+    │       ├── Ryzyko: 6/10
+    │       ├── Wykryte słowa: żołnierz, weteran, wojsko
+    │       ├── Alerty: 🎯 MILITARY & DEFENSE CONTENT DETECTED
+    │       ├── Autor: Biuro Legislacyjne
+    │       └── Data: 2024-09-10
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+KONFIGURACJA SYSTEMU:
+✓ PaddleOCR: CPU Mode (use_gpu=False, enable_mkldnn=True)
+✓ Webshare Proxy: {'Aktywny' if PROXIES else 'Nieaktywny'}
+✓ ThreadPoolExecutor: 8 wątków (parallel processing)
+✓ Retry mechanism: 3 próby z exponential backoff
+✓ PDF DPI: 300 (high resolution)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+UWAGI:
+• To jest tylko przykładowy raport pokazujący format wyjściowy
+• Rzeczywiste wyniki będą zapisane w plikach CSV w folderze '{OUTPUT_DIR}'
+• Każdy plik PDF jest skanowany wizualnie używając OCR
+• Wykrywane są słowa kluczowe z kategorii MILITARY & DEFENSE
+• System automatycznie zapisuje wyniki co 5 minut
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SŁOWA KLUCZOWE (MILITARY & DEFENSE):
+wojsko, czołg, amunicja, F-35, uzbrojenie, obrona narodowa, siły zbrojne,
+żołnierz, weteran, modernizacja armii, kontrakt zbrojeniowy, HIMARS, rakieta,
+zakup broni, sprzęt wojskowy, system obrony, myśliwiec, pancerz, artyleria,
+wojska specjalne, Rosomak, Krab, Borsuk, Narew, Wisła, Homar, Patriot,
+Piorun, Grom, Thunder, Javelin, Bayraktar, M1 Abrams, K2, FA-50, Apache,
+Black Hawk
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Aby rozpocząć prawdziwe skanowanie, uruchom: python main.py
+
+╚════════════════════════════════════════════════════════════════════════════╝
+"""
+    
+    try:
+        with open(sample_file, 'w', encoding='utf-8') as f:
+            f.write(sample_content)
+        print(f"📋 [SAMPLE REPORT] Wygenerowano przykładowy raport: {sample_file}")
+        print(f"📋 [SAMPLE REPORT] Otwórz plik aby zobaczyć oczekiwany format wyjściowy.")
+    except Exception as e:
+        print(f"⚠️  [SAMPLE REPORT] Nie udało się wygenerować raportu: {e}")
 
 # ==============================================================================
 # 🏁 MAIN LOOP
 # ==============================================================================
 
 def main():
-    print("=== SEJM TOTAL AUDIT (FULL FORENSIC V7.2) ===")
+    print("=== SEJM HEAVY AUDIT MODE (MILITARY & DEFENSE SCANNER) ===")
+    print("=== Full OCR with High Resolution (300 DPI) ===")
+    
+    # Generate sample report on startup
+    generate_sample_report()
+    print()
     
     tasks = []
     global_idx = 1
@@ -418,12 +647,14 @@ def main():
             global_idx += 1
             
     print(f"Start pracy. Wyniki co 5 minut w folderze '{OUTPUT_DIR}'.")
+    print(f"Używam {8} wątków do równoległego przetwarzania PDFów.")
     
     buffer_rows = []
     last_save_time = time.time()
     batch_counter = 1
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    # Use 8 threads for parallel processing (5-10 range as specified)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_proc = {executor.submit(worker_process, t[0], t[1], t[2]): t[0]['num'] for t in tasks}
         
         completed = 0

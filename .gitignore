@@ -13,6 +13,9 @@ ENV/
 # Output directories
 sejm_audit_output/
 
+# Sample report
+RAPORT_PROBNY.txt
+
 # IDE
 .vscode/
 .idea/

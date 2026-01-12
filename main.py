@@ -117,6 +117,9 @@ if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
 # ==============================================================================
 # 🚀 OCR INITIALIZATION (CPU MODE - PREVENTS SEGFAULTS)
 # ==============================================================================
+# Security Note: Using PaddlePaddle 3.0.0+ to avoid CVEs in versions <= 2.6.0
+# The application does not use vulnerable functions (paddle.vision.ops.read_file, 
+# paddle.utils.download._wget_download) and only uses the safe PaddleOCR API.
 print("⚡ [OCR INIT] Start silnika PaddleOCR (CPU Mode)...")
 try:
     GLOBAL_OCR_ENGINE = PaddleOCR(

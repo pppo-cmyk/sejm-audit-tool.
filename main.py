@@ -46,7 +46,11 @@ if PROXY_HOST and PROXY_PORT:
         'http': proxy_url,
         'https': proxy_url
     }
-    print(f"🌐 [PROXY] Używam Webshare proxy: {PROXY_HOST}:{PROXY_PORT}")
+    # Log proxy info without credentials
+    if PROXY_USER:
+        print(f"🌐 [PROXY] Używam Webshare proxy: {PROXY_USER}@{PROXY_HOST}:{PROXY_PORT}")
+    else:
+        print(f"🌐 [PROXY] Używam Webshare proxy: {PROXY_HOST}:{PROXY_PORT}")
 else:
     print("⚠️ [PROXY] Brak konfiguracji proxy - używam bezpośredniego połączenia")
 
@@ -121,7 +125,7 @@ def extract_metadata(content, ext):
                         try:
                             date_str = creation_date[2:10]  # YYYYMMDD
                             metadata["Data"] = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-                        except:
+                        except Exception:
                             metadata["Data"] = creation_date
                     else:
                         metadata["Data"] = str(creation_date)
@@ -131,7 +135,7 @@ def extract_metadata(content, ext):
                 metadata["Autor"] = doc.core_properties.author or '?'
                 if doc.core_properties.created:
                     metadata["Data"] = doc.core_properties.created.strftime('%Y-%m-%d')
-    except:
+    except Exception:
         pass
     return metadata
 

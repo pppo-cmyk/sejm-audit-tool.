@@ -62,8 +62,8 @@ SEMANTIC_TRIGGERS = {
     "WOJSKO_SLUZBY": ["wojsko", "obrona narodowa", "zolnierz", "weteran", "amw", 
                       "uzbrojenie", "modernizacja", "fundusz wsparcia", "sluzb specjalnych", 
                       "cba", "abw", "skw", "sww", "wywiad", "kontrwywiad", "funkcjonariusz"],
-    "KORUPCJA": ["korupcja", "lapowka", "przekupstwo", "przywlaszczenie", "malwersacja", 
-                 "oszustwo", "naduzcie", "sprzeniewierzenie"]
+    "WOJSKO": ["sily zbrojne", "wojsko", "uzbrojenie", "amunicja", "czolg", "zakup broni", 
+               "modernizacja armii", "kontrakt zbrojeniowy", "f-35", "himars", "rakieta"]
 }
 
 if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)

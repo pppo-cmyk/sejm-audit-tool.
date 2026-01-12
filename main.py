@@ -46,9 +46,10 @@ if PROXY_HOST and PROXY_PORT:
         'http': proxy_url,
         'https': proxy_url
     }
-    # Log proxy info without credentials
+    # Log proxy info without exposing credentials
     if PROXY_USER:
-        print(f"🌐 [PROXY] Używam Webshare proxy: {PROXY_USER}@{PROXY_HOST}:{PROXY_PORT}")
+        masked_user = f"{PROXY_USER[:2]}***" if len(PROXY_USER) > 2 else "***"
+        print(f"🌐 [PROXY] Używam Webshare proxy: {masked_user}@{PROXY_HOST}:{PROXY_PORT}")
     else:
         print(f"🌐 [PROXY] Używam Webshare proxy: {PROXY_HOST}:{PROXY_PORT}")
 else:

@@ -267,7 +267,7 @@ class ForensicScanner:
         self.visual_text = ""  # OCR z obrazka (GPU)
         self.logic_text = ""   # Tekst z kodu pliku
 
-    def _ocr_cpu(self, images):
+    def ocr_cpu(self, images):
         """Process images using CPU-based OCR"""
         text = ""
         for img in images:
@@ -312,7 +312,7 @@ class ForensicScanner:
                 thread_count=8,
                 use_pdftocairo=True
             )
-            self.visual_text = self._ocr_cpu(images)
+            self.visual_text = self.ocr_cpu(images)
             
             # For forensic analysis, we still want logic text for comparison
             # but visual text is primary
@@ -351,7 +351,7 @@ class ForensicScanner:
                             except Exception:
                                 pass
                     if pil_imgs:
-                        self.visual_text += self._ocr_cpu(pil_imgs)
+                        self.visual_text += self.ocr_cpu(pil_imgs)
                         self.alerts.append("[SKAN W WORDZIE]")
         except Exception:
             pass

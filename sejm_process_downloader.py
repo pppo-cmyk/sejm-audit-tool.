@@ -87,10 +87,6 @@ class SejmProcessDownloader:
         
         # Znajdź nasz proces po numerze
         for proc in processes:
-            # Sprawdź różne warianty identyfikacji procesu
-            proc_num = str(proc.get('number', ''))
-            proc_uе = str(proc.get('uE', ''))
-            
             # Sprawdź czy któryś z druków pasuje do naszego numeru
             prints = proc.get('prints', [])
             if str(self.process_number) in [str(p) for p in prints]:

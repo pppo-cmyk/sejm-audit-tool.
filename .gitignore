@@ -12,6 +12,8 @@ ENV/
 
 # Output directories
 sejm_audit_output/
+process_471_output/
+process_*_output/
 
 # Sample report
 RAPORT_PROBNY.txt

@@ -12,6 +12,9 @@ ENV/
 
 # Output directories
 sejm_audit_output/
+process_471_output/
+process_*_output/
+druk_*_dokumentacja/
 
 # Sample report
 RAPORT_PROBNY.txt

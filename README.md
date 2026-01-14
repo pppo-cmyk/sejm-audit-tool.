@@ -4,29 +4,29 @@ Narzędzia do pobierania i analizy danych z Sejmu RP.
 
 ## 🆕 Sejm Process Downloader (Nowy!)
 
-Prosty program do pobierania konkretnego procesu legislacyjnego wraz z załącznikami i tworzenia drzewa chronologicznego.
+Prosty program do pobierania konkretnego druku sejmowego (np. 471) wraz z załącznikami i tworzenia drzewa chronologicznego.
 
 ### Szybki start
 
 **Windows / Linux / Mac:**
 ```bash
-pip install requests
+pip install requests beautifulsoup4
 python sejm_process_downloader.py
 ```
 
 **Jupyter Notebook (Vast.ai / Google Colab):**
 1. Otwórz plik `sejm_process_downloader.ipynb`
 2. Uruchom wszystkie komórki po kolei
-3. Wyniki zostaną zapisane w folderze `process_471_output`
+3. Wyniki zostaną zapisane w folderze `druk_471_dokumentacja`
 
 ### Konfiguracja
 
-Aby zmienić numer procesu, edytuj zmienne na początku pliku:
+Aby zmienić numer druku, edytuj zmienne na początku pliku:
 
 ```python
 TERM = 10  # Kadencja (np. 10 = X kadencja)
-PROCESS_NUMBER = 471  # Numer procesu do pobrania
-OUTPUT_DIR = "process_471_output"  # Folder wyjściowy
+PROCESS_NUMBER = 471  # Numer druku do pobrania
+OUTPUT_DIR = f"druk_{PROCESS_NUMBER}_dokumentacja"  # Folder wyjściowy
 DOWNLOAD_ATTACHMENTS = True  # Czy pobierać pliki załączników?
 ```
 
@@ -38,6 +38,7 @@ Program tworzy następujące pliki:
 - `drzewo_chronologiczne.txt` - Oś czasu wydarzeń
 - `raport_podsumowujacy.txt` - Raport podsumowujący
 - `druk_XXX/` - Foldery z pobranymi załącznikami
+- `strona_www/` - Dokumenty pobrane bezpośrednio ze strony Sejmu
 
 ### Link do strony Sejmu
 

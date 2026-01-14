@@ -1,4 +1,22 @@
-python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sejm Heavy Audit Mode - Military & Defense Scanner
+===================================================
+
+Pełny skaner wszystkich procesów legislacyjnych z OCR i analizą ryzyka.
+Skanuje dokumenty PDF wizualnie używając PaddleOCR w rozdzielczości 300 DPI.
+
+Użycie:
+    python main.py
+
+Wymagania:
+    pip install -r requirements.txt
+    sudo apt-get install poppler-utils libgl1  # Linux
+
+Autor: Sejm Audit Tool
+"""
+
 import requests
 import io
 import re

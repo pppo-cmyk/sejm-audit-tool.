@@ -7,7 +7,7 @@ This repository contains tools for downloading and analyzing legislative process
 - **sejm_process_downloader.py**: Simple downloader for individual legislative processes
 - **sejm_process_downloader.ipynb**: Jupyter Notebook version for cloud environments
 - **main.py**: Heavy audit mode scanner with OCR and risk analysis
-- **demo.py.**: Demonstration script
+- **demo.py**: Demonstration script
 
 ## Programming Languages & Frameworks
 

@@ -1,3 +1,23 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sejm Audit Tool - Demo
+======================
+
+Skrypt demonstracyjny do testowania konfiguracji GPU i połączenia z API Sejmu.
+Skanuje 3 najnowsze procesy legislacyjne.
+
+Użycie:
+    python demo.py
+
+Wymagania:
+    pip install -r requirements.txt
+    sudo apt-get install poppler-utils libgl1  # Linux
+
+Autor: Sejm Audit Tool
+"""
+
+import sys
 import requests
 import io
 import numpy as np
@@ -8,7 +28,9 @@ from unidecode import unidecode
 from paddleocr import PaddleOCR
 from docx import Document
 
+# ==============================================================================
 # KONFIGURACJA TESTOWA
+# ==============================================================================
 API_URL = "https://api.sejm.gov.pl/sejm"
 OUTPUT_FILE = "wynik_demo.csv"
 DEMO_LIMIT = 3  # Sprawdzi tylko 3 najnowsze ustawy
@@ -22,9 +44,9 @@ print("⚡ [DEMO] Start silnika GPU...")
 try:
     ocr = PaddleOCR(use_angle_cls=True, lang='pl', use_gpu=True, show_log=False)
     print("✅ GPU Gotowe.")
-except:
-    print("❌ BŁĄD GPU! Sprawdź sterowniki.")
-    exit()
+except Exception as e:
+    print(f"❌ BŁĄD GPU! Sprawdź sterowniki. Szczegóły: {e}")
+    sys.exit(1)
 
 def quick_scan(file_bytes, filename):
     text = ""
@@ -65,7 +87,10 @@ def main():
                     if found:
                         print(f"     🔴 ZNALEZIONO: {found}")
                         results.append({"Plik": att, "Znaleziono": found})
-            except: pass
+            except requests.exceptions.RequestException as e:
+                print(f"     ⚠️  Błąd pobierania: {e}")
+            except Exception as e:
+                print(f"     ⚠️  Błąd przetwarzania: {e}")
     
     pd.DataFrame(results).to_csv(OUTPUT_FILE)
     print("\n✅ TEST ZAKOŃCZONY SUKCESEM. MOŻESZ ODPALAĆ MAIN.PY!")
